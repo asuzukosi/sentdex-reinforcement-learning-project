@@ -5,6 +5,12 @@ from datetime import datetime
 from collections import deque
 import numpy as np
 import random
+import cv2
+from PIL import Image
+import os
+from tqdm import tqdm
+
+from qlearning_env import Blob
 
 OBSERVATION_SPACE_SIZE = 256
 ACTION_SPACE_SIZE = 10
@@ -12,8 +18,112 @@ ACTION_SPACE_SIZE = 10
 REPLAY_MEMORY_SIZE = 50_000
 MINIBATCH_SIZE  = 64
 MIN_REPLAY_MEMORY_SIZE = 1_000
-DISCOUNT = 0.9
+DISCOUNT = 0.90
 UPDATE_TARGET_EVERY = 5
+MIN_REWARD = -200
+MEMORY_FRACTION = 0.20
+EPISODES = 20_000
+
+# epsilon stuff
+epsilon = 1
+EPSILON_DECAY = 0.99975
+MIN_EPSILON = 0.001
+
+AGGREGATE_STATS_EVERY = 50
+SHOW_PREVIEW = False
+
+
+
+class BlobEnv:
+    SIZE = 10
+    RETURN_IMAGES = True
+    MOVE_PENALTY = 1
+    ENEMY_PENALTY = 300
+    FOOD_REWARD = 25
+    OBSERVATION_SPACE_VALUES = (SIZE, SIZE, 3)
+    ACTION_SPACE_SIZE = 9
+    PLAYER_N = 1
+    FODD_N = 2
+    ENEMY_N = 3
+    
+    d = {
+        1: (255, 175, 0),
+        2: (0, 255, 0),
+        3: (0, 0, 255)
+    }
+    def __init__(self):
+        pass
+    
+    def reset(self):
+        self.player = Blob(self.SIZE)
+        self.food = Blob(self.SIZE)
+        
+        # ensure food does not spawn in the same location with the user
+        while self.food == self.player:
+            self.food = Blob(self.SIZE)
+        
+        
+        self.enemy = Blob(self.SIZE)
+        # ensure enemy does not spawn in the same location with the user or the food
+        while self.enemy == self.player or self.enemy == self.food:
+            self.enemy = Blob(self.SIZE)
+            
+        self.episode_step = 0
+        if self.RETURN_IMAGES:
+            observation = np.array(self.get_image())
+        else:
+            observation = (self.player - self.food, self.player - self.enemy)
+        return observation
+        
+    
+    def step(self, action):
+        self.episode_step += 1
+        self.player.action(action)
+        if self.RETURN_IMAGES:
+            new_observation = np.array(self.get_image())
+        else:
+            new_observation = (self.player - self.food, self.player - self.enemy)
+        
+        if self.player == self.enemy:
+            reward = -self.ENEMY_PENALTY
+        elif self.player == self.food:
+            reward = self.FOOD_REWARD
+        else:
+            reward = -self.MOVE_PENALTY
+        
+        done = False
+        if reward == self.FOOD_REWARD or reward == -self.ENEMY_PENALTY or self.episode_step >= 200:
+            done = True
+            
+        return new_observation, reward, done
+    
+    def render(self):
+        img = self.get_image()
+        img = img.resize((300, 300))
+        cv2.imshow("image", np.array(img))
+        cv2.waitKey(1)
+        
+    def get_image(self):
+        env = np.zeros((self.SIZE, self.SIZE, 3), dtype=np.uint8)
+        env[self.food.x, self.food.y] = self.d[self.FODD_N]
+        env[self.enemy.x, self.enemy.y] = self.d[self.ENEMY_N]
+        env[self.player.x, self.player.y] = self.d[self.PLAYER_N]
+        img = Image.fromarray(env, "RGB")
+        return img
+        
+    
+    
+env = BlobEnv()
+ep_reward = [-200]
+
+# so results can be same
+random.seed(1)
+np.random.seed(1)
+torch.manual_seed(1)
+
+# create models directory if it does not currently exist
+if not os.path.isdir("models"):
+    os.mkdir("models")
 
 
 # DQN AGENT
@@ -58,7 +168,7 @@ class DQNAgent:
     def update_replay_memory(self, transition):
         self.replay_memory.append(transition)
         
-    def get_qs(self, state, step):
+    def get_qs(self, state):
         return self.target_model(np.array(state).reshape(-1, *state.shape)/255)[0]
     
     
@@ -179,5 +289,33 @@ def fit(model, optimizer, loss, input_data, target_data):
         
         
         
-# agent = DQNAgent()
-# agent.create_model()
+agent = DQNAgent()
+agent.create_model()
+
+ep_rewards = []
+for episode in tqdm(range(1, EPISODES+1), ascii=True, unit="episod"):
+    episode_reward = 0
+    step = 1
+    current_state = env.reset()
+    
+    done = False
+    while not done:
+        if np.random.random() > epsilon:
+            action = np.argmax(agent.get_qs(current_state))
+        else:
+            action = np.random.randint(0, env.ACTION_SPACE_SIZE)
+        new_state, reward, done = env.step(action)
+        episode_reward += reward
+        if SHOW_PREVIEW and not episode % AGGREGATE_STATS_EVERY:
+            env.render()
+            
+        agent.update_replay_memory((current_state, action, reward, new_state, done))
+        agent.train(done, step)
+        
+        current_state = new_state
+        step += 1
+        
+    ep_rewards.append(episode_reward)
+        
+        
+            
